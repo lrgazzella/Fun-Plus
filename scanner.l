@@ -11,7 +11,7 @@ ESCAPE      [n | t | \\ | \" | \']
 %x quote
 %x escape
 %option noyywrap
-/* [\x0A | \x09 | \x5C | \x22 | \x27]  =  \n, \t, \\, \", \' */
+
 %%
 if                     return IF_KW;
 then                   return THEN_KW;
@@ -24,7 +24,7 @@ in                     return IN_KW;
 true                   return LIT_TRUE;
 false                  return LIT_FALSE;
 
-{DQUOTE}               {yylval.string = strdup(""); BEGIN(quote);}
+{DQUOTE}               {yylval.string = strdup(""); BEGIN(quote);} 
 <quote>[^\\\"]*        {yylval.string = strcat_(yylval.string, yytext);}
 <quote>{BACKSLASH}     {BEGIN(escape);}
 <quote>{DQUOTE}        {BEGIN(INITIAL); return STRING_KW;}

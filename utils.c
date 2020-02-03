@@ -47,6 +47,7 @@ struct env *pop(struct env *env) {
   return r;
 }
 
+// Funzione che concatena la stringa src in dest, riallocando dest se necessario
 char * strcat_(char *dest, char *src){
   int len_dest = strlen(dest);
   int len_src = strlen(src);
@@ -54,7 +55,7 @@ char * strcat_(char *dest, char *src){
   dest = realloc(dest, len_dest + len_src + 1);
   return strcat(dest, src);
 }
-
+ 
 char escaped(char c){
   switch (c) {
     case 't':

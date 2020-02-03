@@ -238,147 +238,132 @@ LLVMValueRef codegen_expr(struct expr *e, struct env *env, LLVMModuleRef module,
       return r;
     }
 
-    case LET: { // In questo caso si sta associando ad un identificatore, un valore
+    case LET: {
       LLVMValueRef expr = codegen_expr(e->let.expr, env, module, builder);
       struct env *new_env = push(env, e->let.ident, expr);
       LLVMValueRef body = codegen_expr(e->let.body, new_env, module, builder);
       pop(new_env);
 
-      llvm_build_free(expr, builder);
+      llvm_build_free(expr, builder); // expr è già stato valutato, quindi è un valore
 
       return body;
     }
 
-    case VAR: { // In questo caso si sta associando un identificatore alloca in memoria
-      LLVMValueRef expr = codegen_expr(e->var.expr, env, module, builder); // Valuto l'espressione da assegnare alla variabile
+    case VAR: {
+      LLVMValueRef expr = codegen_expr(e->var.expr, env, module, builder);
 
-      LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(builder); // Prendo il blocco corrente
-      LLVMValueRef f = LLVMGetBasicBlockParent(current_bb); // Prendo la funzione che contiene il blocco corrente
-      LLVMBasicBlockRef entry_bb = LLVMGetEntryBasicBlock(f); // Prendo l'entry block della funzione corrente, ovvero il primo blocco che eseguirebbe
+      LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(builder);
+      LLVMValueRef f = LLVMGetBasicBlockParent(current_bb);
+      LLVMBasicBlockRef entry_bb = LLVMGetEntryBasicBlock(f);
 
-      // create the cell in the entry basic block of the function
       LLVMPositionBuilder(builder, entry_bb, LLVMGetFirstInstruction(entry_bb));
-      LLVMValueRef pointer = LLVMBuildAlloca(builder, LLVMTypeOf(expr), e->var.ident); // pointer è un i8**
+      LLVMValueRef pointer = LLVMBuildAlloca(builder, LLVMTypeOf(expr), e->var.ident);
 
-      // return to the old builder position and continue from there
       LLVMPositionBuilderAtEnd(builder, current_bb);
       LLVMBuildStore(builder, expr, pointer);
 
-      struct env *new_env = push(env, e->var.ident, pointer); // aggiungo il nuovo binding nell'ambiente
-      LLVMValueRef body = codegen_expr(e->var.body, new_env, module, builder); // Valuto il body con il nuovo ambiente
-      pop(new_env); // Rimuovo il binding appena creato
+      struct env *new_env = push(env, e->var.ident, pointer);
+      LLVMValueRef body = codegen_expr(e->var.body, new_env, module, builder);
+      pop(new_env);
 
+      // In questo caso pointer non è un valore ma un riferimento.
+      // Si esegue quindi una load prima di chiamare la funzione llvm_build_free
       llvm_build_free(LLVMBuildLoad(builder, pointer, ""), builder);
 
-      return body; // Ritorno il risultato dell'elaborazione del body
+      return body;
     }
 
-    case ASSIGN: { // Sto assegnando un nuovo valore ad una variabile già presente
-      // Nota che l'assign può essere chiamata solo un su una variabile dichiarate con var
-      // e quindi pointer è sempre un puntatore
-      LLVMValueRef expr = codegen_expr(e->var.expr, env, module, builder); // Genero il codice per valutare l'espressione
-      LLVMValueRef pointer = resolve(env, e->assign.ident); // Recupero il puntatore all'identificatore
+    case ASSIGN: {
+      // Assign può essere chiamata solo un su una variabile dichiarate con var
+      // quindi pointer è sempre un riferimento
+      LLVMValueRef expr = codegen_expr(e->var.expr, env, module, builder);
+      LLVMValueRef pointer = resolve(env, e->assign.ident);
 
       if (LLVMGetTypeKind(LLVMTypeOf(pointer)) == LLVMPointerTypeKind){
-        if (LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(pointer))) == LLVMPointerTypeKind) { // i8**
+        if (LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(pointer))) == LLVMPointerTypeKind) { // caso i8** (stringa dichiarata con var)
+          llvm_build_free(LLVMBuildLoad(builder, pointer, ""), builder);
+          LLVMBuildStore(builder, expr, pointer); // non cambia l'ambiente perchè il riferimento alla memoria è sempre lo stesso
+          return expr;
+        } else if(LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(pointer))) == LLVMStructTypeKind){ // caso struct* (coppia dichiarata con var)
           llvm_build_free(LLVMBuildLoad(builder, pointer, ""), builder);
           LLVMBuildStore(builder, expr, pointer);
           return expr;
-        } else if(LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(pointer))) == LLVMStructTypeKind){ // struct*
-          LLVMValueRef lhs = LLVMBuildLoad(builder, pointer, "");
-          llvm_build_free(lhs, builder);
-          LLVMBuildStore(builder, expr, pointer);
-          return expr;
-        } else if(LLVMGetIntTypeWidth(LLVMGetElementType(LLVMTypeOf(pointer))) == 8) {
+        } else if(LLVMGetIntTypeWidth(LLVMGetElementType(LLVMTypeOf(pointer))) == 8) { // caso i8* (stringa dichiarata con let)
           abort();
         } else {
-          LLVMBuildStore(builder, expr, pointer); // i32* o i1*
+          LLVMBuildStore(builder, expr, pointer); // caso i32* o i1* (intero o booleano dichiarato con var)
           return expr;
         }
-      } else abort(); // i32, i1 e struct con let
+      } else abort(); // caso i32, i1 o struct dichiarati con let
     }
 
-    // free x
-    // assegna la copia di y (ritornata dalla valutazione) a x
-
     case IDENT: {
-      LLVMValueRef val = resolve(env, e->ident); // Prendo il valore associato all'identificatore
+      LLVMValueRef val = resolve(env, e->ident);
 
       if (LLVMGetTypeKind(LLVMTypeOf(val)) == LLVMPointerTypeKind) {
-        if (LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(val))) == LLVMPointerTypeKind) { // i8**
+        if (LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(val))) == LLVMPointerTypeKind) { // caso i8** (stringa dichiarata con var)
           LLVMValueRef string = LLVMBuildLoad(builder, val, "");
           return llvm_build_copy_out(string, builder, module);
-        } else if (LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(val))) == LLVMIntegerTypeKind){ // i32* o i8* o i1*
-          if (LLVMGetIntTypeWidth(LLVMGetElementType(LLVMTypeOf(val))) != 8){ // i32* o i1* -> intero o bool con la var
+        } else if (LLVMGetTypeKind(LLVMGetElementType(LLVMTypeOf(val))) == LLVMIntegerTypeKind){ // caso i32* o i8* o i1*
+          if (LLVMGetIntTypeWidth(LLVMGetElementType(LLVMTypeOf(val))) != 8){ // caso i32* o i1* (intero o bool dichiarato con var)
             return LLVMBuildLoad(builder, val, "");
-          } else { // i8* -> stringa definita con let
+          } else { // caso i8* (stringa dichiarata con let)
             return llvm_build_copy_out(val, builder, module);
           }
-        } else { // è un puntatore a una struct con var
+        } else { // è un puntatore a una struct dichiarata con var
           LLVMValueRef struct_val = LLVMBuildLoad(builder, val, "");
           return llvm_build_copy_out(struct_val, builder, module);
         }
-      } else { // tutto tranne i8* con let. la copia funziona per come è fatta la llvm_build_copy_out
+      } else { // i32 e i1 e struct dichiarata con let
         return llvm_build_copy_out(val, builder, module);
       }
     }
-    // se è i8*  con il let -> ritrona val
-    // se è i8** con il var -> fai la load
-    // se è i32* con il var -> fai la load
-    // altirmenti ritorna val
 
     case IF: {
-      // LLVMGetInsertBlock ritorna il blocco corrente
-      // LLVMGetBasicBlockParent ritorna la funzione a cui appartiene un particolare blocco
       LLVMValueRef f = LLVMGetBasicBlockParent(LLVMGetInsertBlock(builder));
-      // Una volta ottenuta la funzione, creo 3 blocchi, il ramo then, il ramo else e il ramo cont che ricongiunge then e else
+
       LLVMBasicBlockRef then_bb = LLVMAppendBasicBlock(f, "then");
       LLVMBasicBlockRef else_bb = LLVMAppendBasicBlock(f, "else");
       LLVMBasicBlockRef cont_bb = LLVMAppendBasicBlock(f, "cont");
 
-      LLVMValueRef cond = codegen_expr(e->if_expr.cond, env, module, builder); // Valuto la guardia
-      LLVMBuildCondBr(builder, cond, then_bb, else_bb); // Emetto un if => se vale cond vado nel blocco then_bb altrimenti in else_bb
+      LLVMValueRef cond = codegen_expr(e->if_expr.cond, env, module, builder);
+      LLVMBuildCondBr(builder, cond, then_bb, else_bb);
 
       LLVMPositionBuilderAtEnd(builder, then_bb);
-      LLVMValueRef then_val = codegen_expr(e->if_expr.e_true, env, module, builder); // Genero il codice del ramo then
-      LLVMBuildBr(builder, cont_bb); // Salto al blocco successivo (cont)
+      LLVMValueRef then_val = codegen_expr(e->if_expr.e_true, env, module, builder);
+      LLVMBuildBr(builder, cont_bb);
 
       LLVMPositionBuilderAtEnd(builder, else_bb);
-      LLVMValueRef else_val = codegen_expr(e->if_expr.e_false, env, module, builder); // Genero il codice del ramo else
-      LLVMBuildBr(builder, cont_bb); // Salto al blocco successivo (cont)
+      LLVMValueRef else_val = codegen_expr(e->if_expr.e_false, env, module, builder);
+      LLVMBuildBr(builder, cont_bb);
 
       LLVMPositionBuilderAtEnd(builder, cont_bb);
-      LLVMValueRef phi = LLVMBuildPhi(builder, LLVMTypeOf(then_val), ""); // Crea solamente la phi specificando il tipo e il nome ("")
+      LLVMValueRef phi = LLVMBuildPhi(builder, LLVMTypeOf(then_val), "");
       LLVMValueRef values[] = { then_val, else_val };
       LLVMBasicBlockRef blocks[] = { then_bb, else_bb };
-      LLVMAddIncoming(phi, values, blocks, 2); // Add an incoming value to the end of a PHI list.
-      return phi; // In pratica restituisce la phi(then_val, else_val)
+      LLVMAddIncoming(phi, values, blocks, 2);
+      return phi;
     }
 
     case WHILE: {
       LLVMValueRef f = LLVMGetBasicBlockParent(LLVMGetInsertBlock(builder));
-      LLVMBasicBlockRef cond_bb = LLVMAppendBasicBlock(f, "cond"); // Blocco che si occupa di testare la guardia
-      LLVMBasicBlockRef body_bb = LLVMAppendBasicBlock(f, "body"); // Blocco che si occupa di eseguire il body
-      LLVMBasicBlockRef cont_bb = LLVMAppendBasicBlock(f, "cont"); // Blocco raggiunto se la guardia è falsa
+      LLVMBasicBlockRef cond_bb = LLVMAppendBasicBlock(f, "cond");
+      LLVMBasicBlockRef body_bb = LLVMAppendBasicBlock(f, "body");
+      LLVMBasicBlockRef cont_bb = LLVMAppendBasicBlock(f, "cont");
 
-      LLVMValueRef ret = LLVMBuildBr(builder, cond_bb); // Salta subito al blocco della condizione
+      LLVMValueRef ret = LLVMBuildBr(builder, cond_bb);
 
       LLVMPositionBuilderAtEnd(builder, cond_bb);
-      LLVMValueRef cond = codegen_expr(e->while_expr.cond, env, module, builder); // Genera il codice per valutare la guardia
-      LLVMBuildCondBr(builder, cond, body_bb, cont_bb); // Se la guardia cond è vera va nel blocco body_bb altrimenti in cont_bb
+      LLVMValueRef cond = codegen_expr(e->while_expr.cond, env, module, builder);
+      LLVMBuildCondBr(builder, cond, body_bb, cont_bb);
 
       LLVMPositionBuilderAtEnd(builder, body_bb);
-      codegen_expr(e->while_expr.body, env, module, builder); // Genera il codice per eseguire il corpo
-      LLVMBuildBr(builder, cond_bb); // Qui deve sempre andare nel blocco che testa la guardia
+      codegen_expr(e->while_expr.body, env, module, builder);
+      LLVMBuildBr(builder, cond_bb);
 
       LLVMPositionBuilderAtEnd(builder, cont_bb);
       return ret;
     }
-      // LLVMValueRef pointer = LLVMBuildAlloca(builder, type, "");
-      //
-      // // return to the old builder position and continue from there
-      // LLVMPositionBuilderAtEnd(builder, current_bb);
-      // LLVMValueRef struct_v = LLVMBuildLoad(builder, pointer, "");
 
     case UN_OP: {
       LLVMValueRef expr = codegen_expr(e->unop.expr, env, module, builder);
@@ -400,10 +385,10 @@ LLVMValueRef codegen_expr(struct expr *e, struct env *env, LLVMModuleRef module,
     }
 
     case PROJECTION:{
-      LLVMValueRef expr = codegen_expr(e->projection.expr, env, module, builder); // è un valore: o coppia o stringa o intero o booleano
+      LLVMValueRef expr = codegen_expr(e->projection.expr, env, module, builder); // expr è un valore
       LLVMValueRef prj;
 
-      if(LLVMGetTypeKind(LLVMTypeOf(expr)) != LLVMStructTypeKind) abort();
+      if(LLVMGetTypeKind(LLVMTypeOf(expr)) != LLVMStructTypeKind) abort(); // Se non è una struct, errore
 
       switch (e->projection.pos) {
         case 1:
@@ -426,7 +411,7 @@ LLVMValueRef codegen_expr(struct expr *e, struct env *env, LLVMModuleRef module,
 
       switch (e->binop.op) {
         case '+':
-          // Non bisogna deferenziare due volte perchè il case IDENT, nel caso delle stringhe torna sempre un i8*, sia per stringhe definite con var che con let
+          // Controllo che lhs e rhs abbiano lo stesso tipo: i8*
           if(LLVMGetTypeKind(LLVMTypeOf(lhs)) == LLVMPointerTypeKind && LLVMGetTypeKind(LLVMTypeOf(rhs)) == LLVMPointerTypeKind){
             LLVMValueRef args[] = { lhs, rhs };
             LLVMValueRef f_strcat = LLVMGetNamedFunction(module, "strcat_");
@@ -471,8 +456,8 @@ LLVMValueRef codegen_expr(struct expr *e, struct env *env, LLVMModuleRef module,
       }
     }
 
-    case PAIR: { // Il valore di ritorno è la coppia valutata
-      // first e second possono essere o i32, i1, i8 * e un tipo della coppia già definito
+    case PAIR: {
+      // Il valore di ritorno è la coppia valutata, dato che LLVMBuildInsertValue torna un valore
       LLVMValueRef first = codegen_expr(e->pair.first, env, module, builder);
       LLVMValueRef second = codegen_expr(e->pair.second, env, module, builder);
 
@@ -496,46 +481,34 @@ LLVMValueRef codegen_expr(struct expr *e, struct env *env, LLVMModuleRef module,
   }
 }
 
-
-/*
-  Tutti liberano le stringhe in input.
-  La copy out la fa solo chi torna stringhe
-*/
-
-
 LLVMValueRef llvm_build_copy_out(LLVMValueRef toCopy, LLVMBuilderRef builder, LLVMModuleRef module){
-  // toCopy è un valore, ovvero i8* o  struct. In caso di identificatori con var va richiamata dopo la load
+  // toCopy deve essere un valore: i8*, struct, i32 o i1.
+  // Negli ultimi due casi non avviene una copia
 
-  if (LLVMGetTypeKind(LLVMTypeOf(toCopy)) == LLVMPointerTypeKind) {
+  if (LLVMGetTypeKind(LLVMTypeOf(toCopy)) == LLVMPointerTypeKind) { // Caso i8*
     LLVMValueRef args[] = { toCopy };
     LLVMValueRef f_strdup = LLVMGetNamedFunction(module, "strdup");
     LLVMValueRef value = LLVMBuildCall(builder, f_strdup, args, 1, "");
     return value;
-  } else if (LLVMGetTypeKind(LLVMTypeOf(toCopy)) == LLVMStructTypeKind) {
+  } else if (LLVMGetTypeKind(LLVMTypeOf(toCopy)) == LLVMStructTypeKind) { // Caso struct
     LLVMValueRef first = LLVMBuildExtractValue(builder, toCopy, 0, "");
     LLVMValueRef second = LLVMBuildExtractValue(builder, toCopy, 1, "");
 
     LLVMTypeRef types[] = {LLVMTypeOf(first),LLVMTypeOf(second) };
     LLVMTypeRef type = LLVMStructType(types, 2, 0);
 
-    LLVMValueRef new_first = llvm_build_copy_out(first, builder, module);
-    LLVMValueRef new_second = llvm_build_copy_out(second, builder, module);
+    LLVMValueRef new_first = llvm_build_copy_out(first, builder, module); // copia dell'elemento sinistro
+    LLVMValueRef new_second = llvm_build_copy_out(second, builder, module); // copia dell'elemento destro
     LLVMValueRef struct_tmp = LLVMBuildInsertValue(builder, LLVMGetUndef(type), new_first, 0, "");
     return LLVMBuildInsertValue(builder, struct_tmp, new_second, 1, "");
-  } else return toCopy; // i1 e i32
+  } else return toCopy; // caso i1 e i32
 }
 
-// toFree prende un valore -> i8* o una struct.
-// prima di chiamare la llvm_build_free controllare se è doppio puntatore, nel caso fare la load
 void llvm_build_free(LLVMValueRef toFree, LLVMBuilderRef builder){
-  // i8* -> free    -> stringa con var (il chiamante ha fatto la load) o con let
-  // i32 -> niente
-  // i1  -> niente
-  // {tipo1, tipo2} -> struct con var (il chiamante ha fatto la load) o con let
-  //                -> chiama llvm_build_free(tipo1) e llvm_build_free(tipo2)
-  if (LLVMGetTypeKind(LLVMTypeOf(toFree)) == LLVMPointerTypeKind) { // i8*
+  // toFree deve essere un valore
+  if (LLVMGetTypeKind(LLVMTypeOf(toFree)) == LLVMPointerTypeKind) { // caso i8*
     LLVMBuildFree(builder, toFree);
-  }else if (LLVMGetTypeKind(LLVMTypeOf(toFree)) == LLVMStructTypeKind){
+  }else if (LLVMGetTypeKind(LLVMTypeOf(toFree)) == LLVMStructTypeKind){ // caso struct
     LLVMValueRef first = LLVMBuildExtractValue(builder, toFree, 0, "");
     LLVMValueRef second = LLVMBuildExtractValue(builder, toFree, 1, "");
     llvm_build_free(first, builder);
@@ -547,7 +520,6 @@ void jit_eval(struct expr *expr) {
   LLVMModuleRef module = LLVMModuleCreateWithName("exe");
   LLVMBuilderRef builder = LLVMCreateBuilder();
   LLVMExecutionEngineRef engine;
-
 
   LLVMTypeRef print_i32_args[] = {LLVMInt32Type()};
   LLVMTypeRef print_string_args[] = {LLVMPointerType(LLVMInt8Type(), 0)};
@@ -573,13 +545,8 @@ void jit_eval(struct expr *expr) {
     return;
   }
 
-  // LLVM can only emit instructions in basic blocks
-  //   basic blocks are always part of a function
-  //   function are contained in modules
-
-  // visit expression to get its LLVM type
   LLVMTypeRef bad_f_type = LLVMFunctionType(LLVMVoidType(), NULL, 0, 0);
-  LLVMValueRef typing_f = LLVMAddFunction(module, "typing_f", bad_f_type); // TODO
+  LLVMValueRef typing_f = LLVMAddFunction(module, "typing_f", bad_f_type);
   LLVMBasicBlockRef typing_entry_bb = LLVMAppendBasicBlock(typing_f, "entry");
   LLVMPositionBuilderAtEnd(builder, typing_entry_bb);
   LLVMValueRef typing_ret = codegen_expr(expr, NULL, module, builder);
@@ -588,34 +555,31 @@ void jit_eval(struct expr *expr) {
   LLVMDeleteFunction(typing_f);
 
 
-  // emit expression as function body
   LLVMTypeRef actual_f_type = LLVMFunctionType(type, NULL, 0, 0);
   LLVMValueRef f = LLVMAddFunction(module, "f", actual_f_type);
   LLVMBasicBlockRef entry_bb = LLVMAppendBasicBlock(f, "entry");
   LLVMPositionBuilderAtEnd(builder, entry_bb);
   LLVMValueRef ret = codegen_expr(expr, NULL, module, builder);
 
-  // return the result and terminate the function
+
   if (LLVMGetTypeKind(type) == LLVMVoidTypeKind) {
-    LLVMBuildRetVoid(builder); // TODO
+    LLVMBuildRetVoid(builder);
   } else {
-    LLVMBuildRet(builder, ret); // TODO
+    LLVMBuildRet(builder, ret);
   }
 
-  // LLVMDumpValue(f); // TODO eventualmente
   LLVMDumpModule(module);
-
-  LLVMVerifyModule(module, LLVMAbortProcessAction, NULL); // TODO
+  LLVMVerifyModule(module, LLVMAbortProcessAction, NULL);
 
   fprintf(stderr, "running...\n");
-  LLVMGenericValueRef result = LLVMRunFunction(engine, f, 0, NULL); // TODO
+  LLVMGenericValueRef result = LLVMRunFunction(engine, f, 0, NULL);
 
   if (LLVMGetTypeKind(type) == LLVMVoidTypeKind) {
     printf("-> done\n");
   } else {
     printf("-> %d\n", (int)LLVMGenericValueToInt(result, 0));
   }
-  LLVMDisposeGenericValue(result); // TODO
+  LLVMDisposeGenericValue(result); 
 
   LLVMDisposeBuilder(builder);
   LLVMDisposeExecutionEngine(engine);
