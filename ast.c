@@ -268,7 +268,9 @@ LLVMValueRef codegen_expr(struct expr *e, struct env *env, LLVMModuleRef module,
 
       // In questo caso pointer non è un valore ma un riferimento.
       // Si esegue quindi una load prima di chiamare la funzione llvm_build_free
-      llvm_build_free(LLVMBuildLoad(builder, pointer, ""), builder);
+
+      llvm_build_free(expr, builder);
+      //llvm_build_free(LLVMBuildLoad(builder, pointer, ""), builder);
 
       return body;
     }
@@ -579,7 +581,7 @@ void jit_eval(struct expr *expr) {
   } else {
     printf("-> %d\n", (int)LLVMGenericValueToInt(result, 0));
   }
-  LLVMDisposeGenericValue(result); 
+  LLVMDisposeGenericValue(result);
 
   LLVMDisposeBuilder(builder);
   LLVMDisposeExecutionEngine(engine);
